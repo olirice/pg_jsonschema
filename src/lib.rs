@@ -29,6 +29,19 @@ fn jsonschema_is_valid(schema: Json) -> bool {
     }
 }
 
+#[pg_extern(immutable, strict)]
+fn jsonschema_validation_errors(schema: Json, instance: Json) -> Vec<String> {
+    let schema = match jsonschema::JSONSchema::compile(&schema.0) {
+        Ok(s) => s,
+        Err(e) => return vec![e.to_string()],
+    };
+    let errors = match schema.validate(&instance.0) {
+        Ok(_) => vec![],
+        Err(e) => e.into_iter().map(|e| e.to_string()).collect(),
+    };
+    errors
+}
+
 #[pg_schema]
 #[cfg(any(test, feature = "pg_test"))]
 mod tests {
@@ -131,6 +144,57 @@ mod tests {
         assert!(!crate::jsonschema_is_valid(Json(json!({
             "type": "obj"
         }))));
+    }
+
+    #[pg_test]
+    fn test_jsonschema_validation_errors() {
+        // No errors
+        assert!(
+            crate::jsonschema_validation_errors(
+                Json(json!({ "maxLength": 4 })),
+                JsonB(json!("foo")),
+            ),
+            vec![]
+        );
+
+        // One error
+        assert!(
+            crate::jsonschema_validation_errors(
+                Json(json!({ "maxLength": 4 })),
+                JsonB(json!("123456789")),
+            ),
+            vec!["\"123456789\" is longer than 4 characters"]
+        );
+
+        // Multiple errors
+        assert!(
+            crate::jsonschema_validation_errors(
+                Json(json!(
+                {
+                    "type": "object",
+                    "properties": {
+                        "foo": {
+                            "type": "string"
+                        },
+                        "bar": {
+                            "type": "number"
+                        },
+                        "baz": {
+                            "type": "boolean"
+                        },
+                        "additionalProperties": false,
+                        "required": ["foo", "bar", "baz"]
+                    }
+                })),
+                JsonB(json!({"foo": 1, "bar": [], "bat": true})),
+            ),
+            vec![
+                "[] is not of type \"number\"",
+                "1 is not of type \"string\"",
+                "Additional properties are not allowed ('bat' was unexpected)",
+                "\"baz\" is a required property"
+            ]
+        );
     }
 }
 
